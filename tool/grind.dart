@@ -420,6 +420,7 @@ dependencies:
     sdk: flutter
   flutter_test:
     sdk: flutter
+  flame: ^1.0.0-rc9
 ''';
     dependencies.forEach((name, version) {
       content += '  $name: $version\n';

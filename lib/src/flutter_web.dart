@@ -37,6 +37,7 @@ class FlutterWebManager {
   static const Set<String> _flutterImportPrefixes = {
     'package:flutter',
     'dart:ui',
+    'package:flame',
   };
 
   /// A set of all allowed `dart:` imports. Currently includes non-VM libraries
