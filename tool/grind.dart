@@ -423,8 +423,6 @@ dependencies:
     content += '''
   flutter:
     sdk: flutter
-  flutter_test:
-    sdk: flutter
   flame: ^1.0.0-releasecandidate.11
 ''';
     dependencies.forEach((name, version) {

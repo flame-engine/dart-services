@@ -37,6 +37,7 @@ const Set<String> _flutterImportPrefixes = {
   'package:flutter/',
   'package:flutter_test/',
   'package:pedantic/',
+  'package:flame',
   'dart:ui',
 };
 
