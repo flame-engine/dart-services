@@ -426,7 +426,9 @@ dependencies:
   flame: ^1.0.0-releasecandidate.11
 ''';
     dependencies.forEach((name, version) {
-      content += '  $name: $version\n';
+      if (name != 'flame') {
+        content += '  $name: $version\n';
+      }
     });
   }
 
