@@ -14,7 +14,7 @@ import 'package:logging/logging.dart';
 import 'package:path/path.dart' as path;
 
 import 'common.dart';
-import 'project.dart' as project;
+import 'project.dart';
 import 'protos/dart_services.pb.dart' as proto;
 import 'pub.dart';
 import 'scheduler.dart';
@@ -35,29 +35,41 @@ const String _warmupSrc = 'main() { int b = 2;  b++;   b. }';
 const Duration _analysisServerTimeout = Duration(seconds: 35);
 
 class DartAnalysisServerWrapper extends AnalysisServerWrapper {
-  DartAnalysisServerWrapper(this._nullSafety) : super(Sdk.sdkPath);
-  final bool _nullSafety;
+  DartAnalysisServerWrapper(bool nullSafety)
+      : _sourceDirPath = (nullSafety
+                ? ProjectTemplates.nullSafe
+                : ProjectTemplates.nullUnsafe)
+            .dartPath,
+        super(Sdk.sdkPath);
 
   @override
-  String get _sourceDirPath => project.dartTemplateProject(_nullSafety).path;
+  final String _sourceDirPath;
 }
 
 class FlutterAnalysisServerWrapper extends AnalysisServerWrapper {
-  FlutterAnalysisServerWrapper(this._nullSafety) : super(Sdk.sdkPath);
-  final bool _nullSafety;
+  FlutterAnalysisServerWrapper(bool nullSafety)
+      : _sourceDirPath = (nullSafety
+                ? ProjectTemplates.nullSafe
+                : ProjectTemplates.nullUnsafe)
+            // During analysis, we use the Firebase project template. The
+            // Firebase template is separate from the Flutter template only to
+            // keep Firebase references out of app initialization code at
+            // runtime.
+            .firebasePath,
+        super(Sdk.sdkPath);
 
   @override
-  String get _sourceDirPath => project.flutterTemplateProject(_nullSafety).path;
+  final String _sourceDirPath;
 }
 
 abstract class AnalysisServerWrapper {
   final String sdkPath;
   final TaskScheduler serverScheduler = TaskScheduler();
 
-  Future<AnalysisServer> _init;
+  bool _isInitialized = false;
 
   /// Instance to handle communication with the server.
-  AnalysisServer analysisServer;
+  late AnalysisServer analysisServer;
 
   AnalysisServerWrapper(this.sdkPath);
 
@@ -65,55 +77,56 @@ abstract class AnalysisServerWrapper {
 
   String get _sourceDirPath;
 
-  Future<AnalysisServer> init() {
-    if (_init == null) {
-      void onRead(String str) {
-        if (dumpServerMessages) _logger.info('<-- $str');
-      }
-
-      void onWrite(String str) {
-        if (dumpServerMessages) _logger.info('--> $str');
-      }
-
-      final serverArgs = <String>[
-        '--client-id=DartPad',
-        '--client-version=$_sdkVersion',
-      ];
-      _logger.info('Starting server; sdk: `$sdkPath`, args: $serverArgs');
-
-      _init = AnalysisServer.create(
-        onRead: onRead,
-        onWrite: onWrite,
-        sdkPath: sdkPath,
-        serverArgs: serverArgs,
-      ).then((AnalysisServer server) async {
-        analysisServer = server;
-        analysisServer.server.onError.listen((ServerError error) {
-          _logger.severe('server error${error.isFatal ? ' (fatal)' : ''}',
-              error.message, StackTrace.fromString(error.stackTrace));
-        });
-        await analysisServer.server.onConnected.first;
-        await analysisServer.server.setSubscriptions(<String>['STATUS']);
-
-        listenForCompletions();
-        listenForAnalysisComplete();
-        listenForErrors();
-
-        final analysisComplete = getAnalysisCompleteCompleter();
-        await analysisServer.analysis
-            .setAnalysisRoots(<String>[_sourceDirPath], <String>[]);
-        await _sendAddOverlays(<String, String>{mainPath: _warmupSrc});
-        await analysisComplete.future;
-        await _sendRemoveOverlays();
-
-        return analysisServer;
-      }).catchError((Object err, StackTrace st) {
-        _logger.severe('Error starting analysis server ($sdkPath): $err.\n$st');
-        return null;
-      });
+  Future<void> init() async {
+    if (_isInitialized) {
+      throw StateError('AnalysisServerWrapper is already initialized');
     }
 
-    return _init;
+    _isInitialized = true;
+
+    void onRead(String str) {
+      if (dumpServerMessages) _logger.info('<-- $str');
+    }
+
+    void onWrite(String str) {
+      if (dumpServerMessages) _logger.info('--> $str');
+    }
+
+    final serverArgs = <String>[
+      '--client-id=DartPad',
+      '--client-version=$_sdkVersion',
+    ];
+    _logger.info('Starting server; sdk: `$sdkPath`, args: $serverArgs');
+
+    analysisServer = await AnalysisServer.create(
+      onRead: onRead,
+      onWrite: onWrite,
+      sdkPath: sdkPath,
+      serverArgs: serverArgs,
+    );
+
+    try {
+      analysisServer.server.onError.listen((ServerError error) {
+        _logger.severe('server error${error.isFatal ? ' (fatal)' : ''}',
+            error.message, StackTrace.fromString(error.stackTrace));
+      });
+      await analysisServer.server.onConnected.first;
+      await analysisServer.server.setSubscriptions(<String>['STATUS']);
+
+      listenForCompletions();
+      listenForAnalysisComplete();
+      listenForErrors();
+
+      final analysisComplete = getAnalysisCompleteCompleter();
+      await analysisServer.analysis
+          .setAnalysisRoots(<String>[_sourceDirPath], <String>[]);
+      await _sendAddOverlays(<String, String>{mainPath: _warmupSrc});
+      await analysisComplete.future;
+      await _sendRemoveOverlays();
+    } catch (err, st) {
+      _logger.severe('Error starting analysis server ($sdkPath): $err.\n$st');
+      rethrow;
+    }
   }
 
   String get _sdkVersion {
@@ -138,7 +151,7 @@ abstract class AnalysisServerWrapper {
         await _completeImpl(sources, location.sourceName, location.offset);
     var suggestions = results.results;
 
-    final source = sources[location.sourceName];
+    final source = sources[location.sourceName]!;
     final prefix = source.substring(results.replacementOffset, location.offset);
     suggestions = suggestions.where((suggestion) {
       return suggestion.completion
@@ -238,30 +251,26 @@ abstract class AnalysisServerWrapper {
       await _unloadSources();
 
       if (result.hovers.isEmpty) {
-        return null;
+        return const {};
       }
 
       final info = result.hovers.first;
-      final m = <String, String>{};
 
-      m['description'] = info.elementDescription;
-      m['kind'] = info.elementKind;
-      m['dartdoc'] = info.dartdoc;
-
-      m['enclosingClassName'] = info.containingClassDescription;
-      m['libraryName'] = info.containingLibraryName;
-
-      m['deprecated'] = info.parameter;
-      if (info.isDeprecated != null) m['deprecated'] = '${info.isDeprecated}';
-
-      m['staticType'] = info.staticType;
-      m['propagatedType'] = info.propagatedType;
-
-      for (final key in m.keys.toList()) {
-        if (m[key] == null) m.remove(key);
-      }
-
-      return m;
+      return {
+        if (info.elementDescription != null)
+          'description': info.elementDescription!,
+        if (info.elementKind != null) 'kind': info.elementKind!,
+        if (info.dartdoc != null) 'dartdoc': info.dartdoc!,
+        if (info.containingClassDescription != null)
+          'enclosingClassName': info.containingClassDescription!,
+        if (info.containingLibraryName != null)
+          'libraryName': info.containingLibraryName!,
+        if (info.parameter != null) 'parameter': info.parameter!,
+        if (info.isDeprecated != null)
+          'deprecated': info.isDeprecated!.toString(),
+        if (info.staticType != null) 'staticType': info.staticType!,
+        if (info.propagatedType != null) 'propagatedType': info.propagatedType!,
+      };
     }, timeoutDuration: _analysisServerTimeout));
   }
 
@@ -284,25 +293,25 @@ abstract class AnalysisServerWrapper {
         final issue = proto.AnalysisIssue()
           ..kind = error.severity.toLowerCase()
           ..line = error.location.startLine
-          ..message = utils.stripFilePaths(error.message)
+          ..message = utils.normalizeFilePaths(error.message)
           ..sourceName = path.basename(error.location.file)
-          ..hasFixes = error.hasFix
+          ..hasFixes = error.hasFix ?? false
           ..charStart = error.location.offset
           ..charLength = error.location.length
           ..diagnosticMessages.addAll(error.contextMessages?.map((m) =>
                   proto.DiagnosticMessage(
-                      message: utils.stripFilePaths(m.message),
+                      message: utils.normalizeFilePaths(m.message),
                       line: m.location.startLine,
                       charStart: m.location.offset,
                       charLength: m.location.length)) ??
               []);
 
         if (error.url != null) {
-          issue.url = error.url;
+          issue.url = error.url!;
         }
 
         if (error.correction != null) {
-          issue.correction = utils.stripFilePaths(error.correction);
+          issue.correction = utils.normalizeFilePaths(error.correction!);
         }
 
         return issue;
@@ -428,27 +437,28 @@ abstract class AnalysisServerWrapper {
   /// equivalent.
   static Iterable<proto.LinkedEditGroup> _convertLinkedEditGroups(
       Iterable<LinkedEditGroup> groups) {
-    return groups?.map<proto.LinkedEditGroup>((g) {
-          return proto.LinkedEditGroup()
-            ..positions.addAll(g.positions?.map((p) => p.offset)?.toList())
-            ..length = g.length
-            ..suggestions.addAll(g.suggestions
-                ?.map((s) => proto.LinkedEditSuggestion()
-                  ..value = s.value
-                  ..kind = s.kind)
-                ?.toList());
-        }) ??
-        [];
+    return groups.map<proto.LinkedEditGroup>((g) {
+      return proto.LinkedEditGroup()
+        ..positions.addAll(g.positions.map((p) => p.offset).toList())
+        ..length = g.length
+        ..suggestions.addAll(g.suggestions
+            .map((s) => proto.LinkedEditSuggestion()
+              ..value = s.value
+              ..kind = s.kind)
+            .toList());
+    });
   }
 
   /// Cleanly shutdown the Analysis Server.
-  Future<dynamic> shutdown() {
+  Future<void> shutdown() {
     // TODO(jcollins-g): calling dispose() sometimes prevents
     // --pause-isolates-on-exit from working; fix.
     return analysisServer.server
         .shutdown()
         .timeout(const Duration(seconds: 1))
-        .catchError((dynamic e) => null);
+        // At runtime, it appears that [ServerDomain.shutdown] returns a
+        // `Future<Map<dynamic, dynamic>>`.
+        .catchError((_) => {});
   }
 
   /// Internal implementation of the completion mechanism.
@@ -506,7 +516,7 @@ abstract class AnalysisServerWrapper {
   Map<String, String> _getOverlayMapWithPaths(Map<String, String> overlay) {
     final newOverlay = <String, String>{};
     for (final key in overlay.keys) {
-      newOverlay[_getPathFromName(key)] = overlay[key];
+      newOverlay[_getPathFromName(key)] = overlay[key]!;
     }
     return newOverlay;
   }
@@ -515,7 +525,7 @@ abstract class AnalysisServerWrapper {
       path.join(_sourceDirPath, sourceName);
 
   /// Warm up the analysis server to be ready for use.
-  Future<proto.CompleteResponse> warmup({bool useHtml = false}) =>
+  Future<void> warmup({bool useHtml = false}) =>
       complete(useHtml ? _warmupSrcHtml : _warmupSrc, 10);
 
   final Set<String> _overlayPaths = <String>{};
@@ -538,7 +548,7 @@ abstract class AnalysisServerWrapper {
   Future<dynamic> _sendAddOverlays(Map<String, String> overlays) {
     final params = <String, ContentOverlayType>{};
     for (final overlayPath in overlays.keys) {
-      params[overlayPath] = AddContentOverlay(overlays[overlayPath]);
+      params[overlayPath] = AddContentOverlay(overlays[overlayPath]!);
     }
 
     _logger.fine('About to send analysis.updateContent');
@@ -577,7 +587,7 @@ abstract class AnalysisServerWrapper {
 
   Future<CompletionResults> getCompletionResults(String id) {
     _completionCompleters[id] = Completer<CompletionResults>();
-    return _completionCompleters[id].future;
+    return _completionCompleters[id]!.future;
   }
 
   final List<Completer<dynamic>> _analysisCompleters = <Completer<dynamic>>[];
@@ -586,7 +596,7 @@ abstract class AnalysisServerWrapper {
     analysisServer.server.onStatus.listen((ServerStatus status) {
       if (status.analysis == null) return;
 
-      if (!status.analysis.isAnalyzing) {
+      if (!status.analysis!.isAnalyzing) {
         for (final completer in _analysisCompleters) {
           completer.complete();
         }

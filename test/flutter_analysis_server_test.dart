@@ -12,13 +12,30 @@ import 'package:dart_services/src/protos/dart_services.pbserver.dart';
 import 'package:dart_services/src/server_cache.dart';
 import 'package:test/test.dart';
 
+const _lintWarningTrigger = '''
+import 'package:flutter/material.dart';
+
+void main() async {
+  var unknown;
+  print(unknown);
+
+  runApp(MaterialApp(
+      debugShowCheckedModeBanner: false, home: Scaffold(body: HelloWorld())));
+}
+
+class HelloWorld extends StatelessWidget {
+  @override
+  Widget build(context) => const Center(child: Text('Hello world'));
+}
+''';
+
 void main() => defineTests();
 
 void defineTests() {
   for (final nullSafety in [false, true]) {
     group('Null ${nullSafety ? 'Safe' : 'Unsafe'} Flutter SDK analysis_server',
         () {
-      AnalysisServerWrapper analysisServer;
+      late AnalysisServerWrapper analysisServer;
 
       setUp(() async {
         analysisServer = FlutterAnalysisServerWrapper(nullSafety);
@@ -48,7 +65,7 @@ void defineTests() {
     group(
         'Null ${nullSafety ? 'Safe' : 'Unsafe'} Flutter SDK analysis_server with analysis servers',
         () {
-      AnalysisServersWrapper analysisServersWrapper;
+      late AnalysisServersWrapper analysisServersWrapper;
 
       setUp(() async {
         analysisServersWrapper = AnalysisServersWrapper(nullSafety);
@@ -57,6 +74,18 @@ void defineTests() {
 
       tearDown(() async {
         await analysisServersWrapper.shutdown();
+      });
+
+      // https://github.com/dart-lang/dart-pad/issues/2005
+      test('Trigger lint with Flutter code', () async {
+        final results =
+            await analysisServersWrapper.analyze(_lintWarningTrigger);
+        expect(results.issues, hasLength(1));
+        final issue = results.issues[0];
+        expect(issue.line, 4);
+        expect(issue.kind, 'info');
+        expect(
+            issue.message, 'Prefer typing uninitialized variables and fields.');
       });
 
       test('analyze counter app', () async {
@@ -77,7 +106,7 @@ void defineTests() {
     group(
         'Null ${nullSafety ? 'Safe' : 'Unsafe'} CommonServerImpl flutter analyze',
         () {
-      CommonServerImpl commonServerImpl;
+      late CommonServerImpl commonServerImpl;
 
       _MockContainer container;
       _MockCache cache;
@@ -119,10 +148,10 @@ class _MockContainer implements ServerContainer {
 
 class _MockCache implements ServerCache {
   @override
-  Future<String> get(String key) => Future.value(null);
+  Future<String?> get(String key) => Future<String?>.value(null);
 
   @override
-  Future<void> set(String key, String value, {Duration expiration}) =>
+  Future<void> set(String key, String value, {Duration? expiration}) =>
       Future.value();
 
   @override
